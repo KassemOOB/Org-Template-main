@@ -1,0 +1,74 @@
+name: Validate Deployment Before Merge Partial
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    paths:
+      - force-app/**
+    branches:
+      - partial
+jobs:
+  validate-deployment-before-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v3
+        with:
+          node-version: "14"
+      - name: Checkout source code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Install Salesforce CLI
+        run: >
+          wget
+          https://developer.salesforce.com/media/salesforce-cli/sfdx/channels/stable/sfdx-linux-x64.tar.xz
+
+          mkdir ~/sfdx
+
+          tar xJf sfdx-linux-x64.tar.xz -C ~/sfdx --strip-components 1
+
+          echo "$HOME/sfdx/bin" >> $GITHUB_PATH
+
+          ~/sfdx/bin/sfdx version
+      - name: Populate auth file with SFDX_AUTH_URL_PARTIAL secret of target org
+        run: |
+          echo ${{ secrets.SFDX_AUTH_URL_PARTIAL}} > ./SFDX_AUTH_URL_PARTIAL.txt
+      - name: Authenticate to target Org
+        run: sfdx auth:sfdxurl:store -f ./SFDX_AUTH_URL_PARTIAL.txt -s -a targetOrg
+      - name: Installing sfdx git delta
+        run: |
+          echo y | sfdx plugins:install sfdx-git-delta
+          sfdx plugins 
+      - name: Create delta packages for new, modified or deleted metadata
+        run: >
+          mkdir changed-sources
+
+          sfdx sgd:source:delta --to "HEAD" --from "HEAD^" --output changed-sources/ --generate-delta --source force-app/ 
+      - name: Read PR Body
+        env:
+          PR_BODY: ${{github.event.pull_request.body}}
+        run: |
+          
+          FILE=./parsePR.js 
+          if test -f "$FILE"; then
+              echo $PR_BODY > ./pr_body.txt
+              node ./parsePR.js              
+              TESTS=$(cat testsToRun.txt)
+              echo "APEX_TESTS=$TESTS" >> $GITHUB_ENV     
+          else
+              TESTS=all
+              echo "APEX_TESTS=$TESTS" >> $GITHUB_ENV 
+          fi
+      - name: Deployment - run specified tests
+        if: ${{ env.APEX_TESTS != 'all' }}
+        run: >
+          echo ${{env.APEX_TESTS}}
+
+          sfdx force:source:deploy -p "changed-sources/force-app" --checkonly --testlevel RunSpecifiedTests --runtests ${{env.APEX_TESTS}} --json
+      - name: Deployment - run all tests
+        if: ${{ env.APEX_TESTS == 'all' }}
+        run: >
+          echo ${{env.APEX_TESTS}}
+
+          sfdx force:source:deploy -p "changed-sources/force-app" --checkonly --testlevel RunLocalTests --json
